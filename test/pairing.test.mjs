@@ -36,3 +36,16 @@ test('pairing refresh recovers expired sessions without restarting a linked phon
   assert.equal((await post({Host:'localhost:3012'})).status,403);
   assert.equal(actions.length,2);
 });
+
+test('panel proxies scheduled attachments and action keys without weakening origin checks',async t=>{
+ const received=[];
+ const hub=createServer(async(req,res)=>{let body='';for await(const c of req)body+=c;received.push({path:req.url,key:req.headers['idempotency-key'],auth:req.headers.authorization,body:JSON.parse(body)});res.setHeader('Content-Type','application/json');res.end('{"ok":true}');});
+ hub.listen(0,'127.0.0.1');await once(hub,'listening');
+ const panel=createPairingServer({hubUrl:`http://127.0.0.1:${hub.address().port}`,hubKey:'fixture-only'});panel.listen(0,'127.0.0.1');await once(panel,'listening');
+ t.after(async()=>{await new Promise(r=>panel.close(r));await new Promise(r=>hub.close(r));});
+ const post=(path,body,extra={})=>new Promise((resolve,reject)=>{const req=request(`http://127.0.0.1:${panel.address().port}${path}`,{method:'POST',headers:{Host:'localhost:3012',Origin:'http://localhost:3012','Content-Type':'application/json',...extra}},res=>{res.resume();res.on('end',()=>resolve(res.statusCode));});req.on('error',reject);req.end(JSON.stringify(body));});
+ assert.equal(await post('/v1/schedules',{data:'x'.repeat(50000)}),200);assert.equal(received[0].body.data.length,50000);
+ assert.equal(await post('/v1/message-actions',{action:'pin'},{'Idempotency-Key':'fixture-action'}),200);assert.equal(received[1].key,'fixture-action');assert.equal(received[1].auth,'Bearer fixture-only');
+ assert.equal(await post('/v1/schedules/abcd-1234/skip',{expectedNextRun:'fixture'}),200);
+ assert.equal(await post('/v1/message-actions',{action:'delete'},{Origin:'https://other.example'}),403);assert.equal(received.length,3);
+});

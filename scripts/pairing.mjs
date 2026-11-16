@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import {readFile} from 'node:fs/promises';
 process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 loadEnvFile('.env');
-export function createPairingServer({wahaUrl='http://127.0.0.1:3010',wahaKey=process.env.WAHA_API_KEY}={}) {
+export function createPairingServer({wahaUrl='http://127.0.0.1:3010',wahaKey=process.env.WAHA_API_KEY,hubUrl='http://127.0.0.1:3011',hubKey=process.env.HUB_API_KEY,port=3012}={}) {
 let recovery;
 async function engine(path,method='GET'){
   const response=await fetch(wahaUrl+path,{method,headers:{'X-Api-Key':wahaKey,Accept:'application/json','Content-Type':'application/json'},...(method==='POST'?{body:'{}'}:{}),signal:AbortSignal.timeout(15000)});
@@ -18,17 +18,17 @@ return createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  const hosts = ['127.0.0.1:3012', 'localhost:3012'];
+  const hosts = [`127.0.0.1:${port}`, `localhost:${port}`];
   const localOrigin=hosts.some(h=>req.headers.origin===`http://${h}`);
   if (!hosts.includes(req.headers.host) || (req.headers.origin && !localOrigin) || req.headers['sec-fetch-site'] === 'cross-site' || !['GET','POST','PUT','PATCH','DELETE'].includes(req.method)) {res.writeHead(403).end();return;}
   if(req.method!=='GET'&&(!localOrigin||req.headers['content-type']!=='application/json')){res.writeHead(403).end();return;}
   try {
     const path=new URL(req.url,'http://localhost').pathname;
-    const apiRoutes=['/v1/status','/v1/groups','/v1/schedules','/v1/history'];
-    if(apiRoutes.includes(path)||/^\/v1\/schedules\/[a-f0-9-]+(?:\/enabled)?$/.test(path)){
+    const apiRoutes=['/v1/status','/v1/groups','/v1/schedules','/v1/history','/v1/message-actions','/v1/capabilities'];
+    if(apiRoutes.includes(path)||/^\/v1\/schedules\/[a-f0-9-]+(?:\/(?:enabled|skip))?$/.test(path)){
       const chunks=[];let length=0;
-      for await(const chunk of req){length+=chunk.length;if(length>32000){res.writeHead(413).end(JSON.stringify({error:'Request is too large.'}));return;}chunks.push(chunk);}
-      const response=await fetch('http://127.0.0.1:3011'+path,{method:req.method,headers:{Authorization:`Bearer ${process.env.HUB_API_KEY}`,'Content-Type':'application/json'},...(req.method!=='GET'?{body:Buffer.concat(chunks)}:{}),signal:AbortSignal.timeout(35000)});
+      for await(const chunk of req){length+=chunk.length;if(length>8*1024*1024){res.writeHead(413).end(JSON.stringify({error:'Request is too large.'}));return;}chunks.push(chunk);}
+      const response=await fetch(hubUrl+path,{method:req.method,headers:{Authorization:`Bearer ${hubKey}`,'Content-Type':'application/json',...(req.headers['idempotency-key']?{'Idempotency-Key':req.headers['idempotency-key']}:{})},...(req.method!=='GET'?{body:Buffer.concat(chunks)}:{}),signal:AbortSignal.timeout(35000)});
       res.writeHead(response.status,{'Content-Type':'application/json'});res.end(await response.text());return;
     }
     if(req.method==='POST'){

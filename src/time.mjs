@@ -20,14 +20,28 @@ export function nextRun(schedule,after) {
   if(schedule.frequency==='once')return null;
   const initial=schedule.start_local;
   const nowParts=localParts(new Date(after),schedule.timezone);
-  const day=new Date(Date.UTC(nowParts.year,nowParts.month-1,nowParts.day));
-  const wantedDay=new Date(initial.slice(0,10)+'T12:00:00Z').getUTCDay();
-  for(let i=0;i<370;i++,day.setUTCDate(day.getUTCDate()+1)) {
-    const weekday=day.getUTCDay();
-    if(schedule.frequency==='weekdays'&&[0,6].includes(weekday))continue;
-    if(schedule.frequency==='weekly'&&weekday!==wantedDay)continue;
+  const anchor=new Date(initial.slice(0,10)+'T00:00:00Z');
+  const day=new Date(Math.max(anchor.getTime(),Date.UTC(nowParts.year,nowParts.month-1,nowParts.day)));
+  for(;day.getUTCFullYear()<=2100;day.setUTCDate(day.getUTCDate()+1)) {
     const local=`${day.getUTCFullYear()}-${pad(day.getUTCMonth()+1)}-${pad(day.getUTCDate())}T${initial.slice(11)}`;
+    if(schedule.end_date&&local.slice(0,10)>schedule.end_date)return null;
+    if(!matchesRecurrence(schedule,day))continue;
     try{const utc=localToUtc(local,schedule.timezone);if(utc>after)return utc;}catch(error){if(!error.message.includes('clocks change'))throw error;}
   }
-  throw new Error('Could not calculate the next occurrence.');
+  return null;
+}
+
+export function matchesRecurrence(schedule,day) {
+  const anchor=new Date(schedule.start_local.slice(0,10)+'T00:00:00Z');
+  const gap=Math.round((day-anchor)/86400000),interval=schedule.repeat_interval||1;
+  const weekdays=typeof schedule.weekdays==='string'?JSON.parse(schedule.weekdays):schedule.weekdays||[];
+  const monthDays=typeof schedule.month_days==='string'?JSON.parse(schedule.month_days):schedule.month_days||[];
+  if(gap<0)return false;
+  if(schedule.frequency==='monthly'){
+    const months=(day.getUTCFullYear()-anchor.getUTCFullYear())*12+day.getUTCMonth()-anchor.getUTCMonth();
+    return months%interval===0&&(monthDays.length?monthDays:[anchor.getUTCDate()]).includes(day.getUTCDate());
+  }
+  const allowed=schedule.frequency==='weekdays'?[1,2,3,4,5]:weekdays.length?weekdays:schedule.frequency==='weekly'?[anchor.getUTCDay()]:[0,1,2,3,4,5,6];
+  const period=schedule.frequency==='weekly'?Math.floor((gap+(anchor.getUTCDay()+6)%7)/7):gap;
+  return period%interval===0&&allowed.includes(day.getUTCDay());
 }

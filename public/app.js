@@ -1,6 +1,6 @@
 const $=id=>document.getElementById(id);
-const state={schedules:[],history:[],groups:[],editing:null,route:'dashboard',deleteId:null,busy:false,schedulePage:1,historyPage:1,connected:false,scheduleScope:'upcoming',scheduleSort:'earliest',phone:null};
-const frequencyNames={once:'Once',daily:'Every day',weekdays:'Weekdays',weekly:'Every week'};
+const state={schedules:[],history:[],groups:[],editing:null,route:'dashboard',deleteId:null,busy:false,schedulePage:1,historyPage:1,connected:false,scheduleScope:'upcoming',scheduleSort:'earliest',phone:null,advanced:false,messageActions:false};
+const frequencyNames={once:'Once',daily:'Every day',weekdays:'Weekdays',weekly:'Every week',monthly:'Every month'};
 function icon(name){const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 256 256');svg.setAttribute('class','icon');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');svg.dataset.phosphor=name;svg.innerHTML=phosphorIcons[name]||phosphorIcons.clock;return svg;}
 for(const el of document.querySelectorAll('[data-icon]'))el.replaceChildren(icon(el.dataset.icon));
 document.querySelector('.schedule-heading').append($('new-schedule'));document.querySelector('#schedules-section .records-toolbar').append(document.querySelector('.schedule-scope'));
@@ -29,7 +29,7 @@ const descriptions={chats:'A shared inbox for WhatsApp conversations.',calls:'Ma
 function error(id,message){$(id).textContent=message||'';$(id).hidden=!message;}
 function notice(message){$('notice').textContent=message;$('notice').hidden=false;}
 function info(title,copy='Coming soon. This feature is not available in SuperSkope yet.'){$('info-title').textContent=title;$('info-copy').textContent=copy;if(!$('info-dialog').open)$('info-dialog').showModal();}
-async function api(path,{method='GET',body}={}){const response=await fetch(path,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(40000)});const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed. Please retry.');return data;}
+async function api(path,{method='GET',body,headers={}}={}){const response=await fetch(path,{method,headers:{'Content-Type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(40000)});const data=await response.json();if(!response.ok)throw Object.assign(Error(data.error||'Request failed. Please retry.'),{status:response.status,outcome:data.state});return data;}
 function currentRoute(){return location.pathname==='/connect'?'settings/phones':location.hash.slice(1)||'dashboard';}
 function navigate(route){history.pushState({},'',route==='settings/phones'?'/connect':'/#'+route);showView(route);}
 function showView(route){
@@ -86,17 +86,18 @@ function renderSchedules(){
  $('filter-count').hidden=status==='all'&&repeat==='all';$('filter-count').textContent=String(Number(status!=='all')+Number(repeat!=='all'));
  const rows=$('schedule-rows');rows.replaceChildren();$('empty').hidden=state.schedules.length>0;$('no-results').hidden=!state.schedules.length||filtered.length>0;$('schedule-table').hidden=false;
  for(const s of pageItems(filtered,'schedule')){
-  const tr=node('tr'),message=node('td');const title=node('div',s.name,'row-title');title.title=s.name;const preview=node('p',s.text,'row-preview');preview.title=s.text;message.append(title,preview);if(s.last_error)message.append(node('p',s.last_error,'error'));
+  const tr=node('tr'),message=node('td');const title=node('div',s.name,'row-title');title.title=s.name;const preview=node('p',[s.filename,s.text].filter(Boolean).join(' · '),'row-preview');preview.title=preview.textContent;message.append(title,preview);if(s.last_error)message.append(node('p',s.last_error,'error'));
   const when=node('td');when.append(node('div',s.next_run?formatTime(s.next_run,s.timezone):'–','date'),node('p',s.timezone,'row-subtitle'));
   const status=scheduleStatus(s),statusCell=node('td',status[0].toUpperCase()+status.slice(1),'state-'+status);const controls=node('td'),actions=node('div',undefined,'row-actions');
   actions.append(action('Edit '+s.name,'edit',()=>openEditor(s)));
   if(s.next_run||s.frequency!=='once')actions.append(action((s.enabled?'Pause ':'Resume ')+s.name,s.enabled?'pause':'play',async()=>{await api(`/v1/schedules/${s.id}/enabled`,{method:'PATCH',body:{enabled:!s.enabled}});notice(s.enabled?'Schedule paused. A message already sending may still finish.':'Schedule resumed.');await loadSchedules();}));
-  actions.append(action('Delete '+s.name,'trash',()=>{state.deleteId=s.id;error('delete-error');$('delete-dialog').showModal();}));controls.append(actions);const chat=groupCell(s.chat_id,s.group_name);chat.append(message.firstChild,preview);if(s.last_error)chat.append(node('p',s.last_error,'error'));tr.append(chat,node('td',frequencyNames[s.frequency]),when,statusCell,controls);rows.append(tr);
+  if(state.advanced&&s.next_run)actions.append(action('Skip next '+s.name,'arrow-right',async()=>{await api(`/v1/schedules/${s.id}/skip`,{method:'POST',body:{expectedNextRun:s.next_run}});notice('Next occurrence skipped.');await loadSchedules();}));
+  actions.append(action('Delete '+s.name,'trash',()=>{state.deleteId=s.id;error('delete-error');$('delete-dialog').showModal();}));controls.append(actions);const chat=groupCell(s.chat_id,s.group_name);chat.append(message.firstChild,preview);if(s.last_error)chat.append(node('p',s.last_error,'error'));const recurrence=node('td',undefined,'repeat-cell'),parts=repeatLabel(s).split(' · ');recurrence.append(node('div',parts[0],'repeat-cadence'));if(parts[1])recurrence.append(node('p',parts[1],'row-subtitle'));tr.append(chat,recurrence,when,statusCell,controls);rows.append(tr);
  }
 }
 async function loadSchedules(){try{state.schedules=await api('/v1/schedules');error('page-error');renderSchedules();}catch(e){error('page-error',e.message+' Click Refresh to try again.');}finally{$('loading').hidden=true;}}
 function renderHistory(){const query=$('history-search').value.toLocaleLowerCase();const source=state.route==='logs/scheduled'?state.history.filter(e=>e.schedule_id):state.history;const filtered=source.filter(e=>[e.schedule_name,e.message_text,e.group_name,e.chat_id,e.state].join(' ').toLocaleLowerCase().includes(query));const rows=$('history-rows');rows.replaceChildren();$('history-table').hidden=!filtered.length;$('history-empty').hidden=!!source.length;$('history-no-results').hidden=!source.length||!!filtered.length;
- for(const entry of pageItems(filtered,'history')){const tr=node('tr'),message=node('td');message.append(node('div',entry.schedule_name||(entry.message_type==='pdf'?'PDF':'Message'),'row-title'),node('p',entry.message_text||'–','row-preview'));const status=node('td');const names={sent:'Sent',unknown:'Unconfirmed',skipped:'Skipped',failed:'Failed',sending:'Sending'};status.append(node('div',names[entry.state]||entry.state,entry.state==='sent'?'state-sent':'result-error'));const detail=entry.error||(entry.state==='unknown'?'Check WhatsApp before rescheduling.':'');if(detail)status.append(node('p',detail,'result-note'));tr.append(message,groupCell(entry.chat_id,entry.group_name),node('td',formatTime(entry.created_at,Intl.DateTimeFormat().resolvedOptions().timeZone,true),'date'),status);rows.append(tr);}
+ for(const entry of pageItems(filtered,'history')){const tr=node('tr'),message=node('td');message.append(node('div',entry.schedule_name||(entry.message_type==='pdf'?'PDF':'Message'),'row-title'),node('p',entry.message_text||'–','row-preview'));const status=node('td');const names={sent:'Sent',unknown:'Unconfirmed',skipped:'Skipped',failed:'Failed',sending:'Sending'};status.append(node('div',names[entry.state]||entry.state,entry.state==='sent'?'state-sent':'result-error'));const detail=entry.error||(entry.state==='unknown'?'Check WhatsApp before rescheduling.':'');if(detail)status.append(node('p',detail,'result-note'));tr.append(message,groupCell(entry.chat_id,entry.group_name),node('td',formatTime(entry.created_at,Intl.DateTimeFormat().resolvedOptions().timeZone,true),'date'),status);const controls=node('td');if(state.messageActions&&entry.state==='sent'&&entry.message_id)controls.append(action('Actions for '+(entry.message_text||'message'),'settings',()=>openMessageAction(entry)));else controls.append(node('span','–','muted'));tr.append(controls);rows.append(tr);}
 }
 async function loadHistory(){$('reload-history').disabled=true;try{state.history=await api('/v1/history');renderHistory();error('page-error');}catch(e){error('page-error',e.message+' Click Refresh to try again.');}finally{$('reload-history').disabled=false;}}
 for(const kind of ['schedule','history'])for(const [suffix,delta] of [['previous',-1],['next',1]])$(kind+'-'+suffix).addEventListener('click',()=>{state[kind+'Page']+=delta;kind==='schedule'?renderSchedules():renderHistory();});
@@ -109,11 +110,76 @@ $('history-search').addEventListener('input',()=>{state.historyPage=1;renderHist
 function fillGroups(selected=$('group').value){const query=$('group-filter').value.toLocaleLowerCase();$('group').replaceChildren(new Option('Choose a group',''));for(const g of state.groups.filter(g=>g.name.toLocaleLowerCase().includes(query)||g.id===selected))$('group').add(new Option(g.name,g.id));$('group').value=selected;}
 async function loadGroups(){$('group').disabled=true;error('group-error');$('retry-groups').hidden=true;try{const data=await api('/v1/groups');state.groups=(Array.isArray(data)?data:Object.values(data)).map(g=>({id:typeof g.id==='string'?g.id:g.id?._serialized,name:g.subject||g.name||'Unnamed group'})).filter(g=>g.id?.endsWith('@g.us')).sort((a,b)=>a.name.localeCompare(b.name));fillGroups(state.editing?.chat_id);if(['logs/apis','logs/scheduled'].includes(state.route))renderHistory();if(!state.groups.length){error('group-error','No groups found. Join a group in WhatsApp, then reload.');$('retry-groups').hidden=false;}}catch(e){error('group-error',e.message+' Connect WhatsApp, then reload groups.');$('retry-groups').hidden=false;}finally{$('group').disabled=false;}}
 function localDate(date,zone){const p=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(date)).map(p=>[p.type,p.value]));return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;}
-function openEditor(schedule=null){if(state.busy)return;state.editing=schedule;state.editorTrigger=document.activeElement;error('form-error');$('schedule-form').reset();$('group-filter').value='';const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone;const zone=schedule?.timezone||(localZone==='Asia/Calcutta'?'Asia/Kolkata':localZone)||'Asia/Kolkata';$('timezone').value=zone;$('name').value=schedule?.name||'';$('message').value=schedule?.text||'';$('frequency').value=schedule?.frequency||'once';$('start').value=schedule?.next_run&&Date.parse(schedule.next_run)>Date.now()?localDate(schedule.next_run,zone):localDate(Date.now()+10*60000,zone);$('enabled').checked=schedule?!!schedule.enabled:true;$('editor-title').textContent=schedule?'Edit Scheduled Message':'Schedule Message';$('save').textContent=schedule?'Save changes':'Schedule message';updateSummary();loadGroups();$('editor').showModal();$('name').focus();}
+function openEditor(schedule=null){
+ if(state.busy)return;state.editing=schedule;state.editorTrigger=document.activeElement;error('form-error');$('schedule-form').reset();state.attachment=null;state.fileReading=false;
+ $('group-filter').value='';const localZone=Intl.DateTimeFormat().resolvedOptions().timeZone;
+ const zone=schedule?.timezone||(localZone==='Asia/Calcutta'?'Asia/Kolkata':localZone)||'Asia/Kolkata';
+ $('timezone').value=zone;$('name').value=schedule?.name||'';$('message').value=schedule?.text||'';$('frequency').value=schedule?.frequency||'once';
+ $('message-type').value=schedule?.message_type||'text';$('repeat-interval').value=schedule?.repeat_interval||1;$('end-date').value=schedule?.end_date||'';$('month-days').value=(schedule?.month_days||[]).join(', ');
+ for(const checkbox of document.querySelectorAll('[name="repeat-day"]'))checkbox.checked=(schedule?.weekdays||[]).includes(Number(checkbox.value));
+ $('repeat-options').open=!!(schedule&&(schedule.repeat_interval>1||schedule.end_date||schedule.weekdays?.length||schedule.month_days?.length));
+ $('start').value=schedule?.next_run&&Date.parse(schedule.next_run)>Date.now()?localDate(schedule.next_run,zone):localDate(Date.now()+10*60000,zone);
+ $('enabled').checked=schedule?!!schedule.enabled:true;$('editor-title').textContent=schedule?'Edit Scheduled Message':'Schedule Message';$('save').textContent=schedule?'Save changes':'Schedule message';
+ updateContentFields();updateRepeatFields();updateSummary();loadGroups();$('editor').showModal();$('name').focus();
+}
+function repeatLabel(s){
+ const n=s.repeat_interval||1;if(s.frequency==='once')return 'Once';
+ const unit={daily:'day',weekdays:'day',weekly:'week',monthly:'month'}[s.frequency];
+ let label=n===1?frequencyNames[s.frequency]:`Every ${n} ${unit}s`;
+ if(s.weekdays?.length)label+=' · '+s.weekdays.map(d=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d]).join(', ');
+ if(s.month_days?.length)label+=' · '+s.month_days.join(', ');
+ return label;
+}
+function updateContentFields(){
+ const type=$('message-type').value,media=type!=='text';$('attachment-fields').hidden=!media;$('message-label').textContent=media?'Caption (optional)':'Message';
+ $('message').required=!media;$('message').maxLength=media?1000:4000;$('attachment').accept=type==='pdf'?'application/pdf':'image/png,image/jpeg';
+ const retained=state.editing?.message_type===type&&state.editing?.has_attachment;
+ $('attachment-note').textContent=state.attachment?state.attachment.filename:retained?`Current file: ${state.editing.filename}. Choose a file to replace it.`:'Choose a file up to 5 MB.';
+}
+function updateRepeatFields(){
+ const f=$('frequency').value;$('repeat-options').hidden=f==='once'||!state.advanced;
+ for(const input of $('repeat-options').querySelectorAll('input'))input.disabled=f==='once'||!state.advanced;$('weekday-options').hidden=!['daily','weekly'].includes(f);$('monthday-options').hidden=f!=='monthly';
+ $('interval-unit').textContent=f==='monthly'?'months':f==='weekly'?'weeks':'days';
+}
+$('message-type').disabled=true;$('frequency').querySelector('[value=monthly]').disabled=true;
+async function loadCapabilities(){try{const c=await api('/v1/capabilities');state.advanced=c.advancedSchedules===true;state.messageActions=c.messageActions===true;}catch{state.advanced=false;state.messageActions=false;}
+ $('message-type').disabled=!state.advanced;$('frequency').querySelector('[value=monthly]').disabled=!state.advanced;updateRepeatFields();if(state.route==='settings/scheduled')renderSchedules();if(['logs/apis','logs/scheduled'].includes(state.route))renderHistory();}
+$('message-type').addEventListener('change',()=>{state.attachment=null;$('attachment').value='';updateContentFields();updateSummary();});
+$('attachment').addEventListener('change',async()=>{
+ const file=$('attachment').files[0];state.attachment=null;error('form-error');if(!file){updateContentFields();return;}
+ if(file.size>5*1024*1024){error('form-error','Choose a file under 5 MB.');$('attachment').value='';updateContentFields();return;}
+ state.fileReading=true;$('save').disabled=true;
+ try{const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(Error('Could not read the file. Choose it again.'));reader.readAsDataURL(file);});if($('attachment').files[0]===file)state.attachment={filename:file.name,data};}
+ catch(e){error('form-error',e.message);}finally{state.fileReading=false;$('save').disabled=state.busy;updateContentFields();}
+});
+$('frequency').addEventListener('change',()=>{updateRepeatFields();updateSummary();});
+for(const id of ['repeat-interval','end-date','month-days'])$(id).addEventListener('input',updateSummary);
+for(const input of document.querySelectorAll('[name="repeat-day"]'))input.addEventListener('change',updateSummary);
 function closeEditor(){if(state.busy)return;$('editor').close();state.editing=null;if(state.editorTrigger?.isConnected)state.editorTrigger.focus();}
 $('editor').addEventListener('cancel',event=>{event.preventDefault();closeEditor();});
-function updateSummary(){$('char-count').textContent=`${$('message').value.length.toLocaleString()} / 4,000`;const local=$('start').value,frequency=$('frequency').value;if(!local){$('schedule-summary').textContent='Choose when to send.';return;}const date=new Date(local+':00Z');if(Number.isNaN(date.getTime()))return;const label=new Intl.DateTimeFormat('en-GB',{timeZone:'UTC',weekday:'short',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(date);const repeat=frequency==='weekly'?`Every ${new Intl.DateTimeFormat('en-GB',{timeZone:'UTC',weekday:'long'}).format(date)}`:frequencyNames[frequency];$('schedule-summary').textContent=`${label} · ${$('timezone').value} · ${repeat}`;}
-$('schedule-form').addEventListener('submit',async event=>{event.preventDefault();if(state.busy)return;state.busy=true;$('save').disabled=true;error('form-error');try{const group=state.groups.find(g=>g.id===$('group').value);if(!group)throw Error('Choose a group before scheduling.');const body={name:$('name').value,chatId:group.id,groupName:group.name,text:$('message').value,timezone:$('timezone').value,startLocal:$('start').value,frequency:$('frequency').value,enabled:$('enabled').checked};await api(state.editing?`/v1/schedules/${state.editing.id}`:'/v1/schedules',{method:state.editing?'PUT':'POST',body});state.busy=false;closeEditor();clearFilters();notice(body.enabled?'Message scheduled.':'Schedule saved and paused.');await loadSchedules();}catch(e){error('form-error',e.message);}finally{state.busy=false;$('save').disabled=false;}});
+function selectedWeekdays(){return [...document.querySelectorAll('[name="repeat-day"]:checked')].map(e=>Number(e.value));}
+function selectedMonthDays(){return $('month-days').value.trim()?$('month-days').value.split(',').map(v=>Number(v.trim())):[];}
+function updateSummary(){
+ $('char-count').textContent=`${$('message').value.length.toLocaleString()} / ${$('message-type').value==='text'?'4,000':'1,000'}`;
+ if(!$('start').value){$('schedule-summary').textContent='Choose when to send.';return;}
+ const date=new Date($('start').value+':00Z');if(Number.isNaN(date.getTime()))return;
+ const label=new Intl.DateTimeFormat('en-GB',{timeZone:'UTC',weekday:'short',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(date),frequency=$('frequency').value;
+ const repeat=repeatLabel({frequency,repeat_interval:Number($('repeat-interval').value)||1,weekdays:['daily','weekly'].includes(frequency)?selectedWeekdays():[],month_days:frequency==='monthly'?selectedMonthDays():[]});
+ $('schedule-summary').textContent=`${label} · ${$('timezone').value} · ${repeat}`+(frequency!=='once'&&$('end-date').value?' · Ends '+$('end-date').value:'');
+}
+$('schedule-form').addEventListener('submit',async event=>{
+ event.preventDefault();if(state.busy||state.fileReading)return;state.busy=true;$('save').disabled=true;error('form-error');
+ try{
+  const group=state.groups.find(g=>g.id===$('group').value);if(!group)throw Error('Choose a group before scheduling.');
+  const type=$('message-type').value,frequency=$('frequency').value;
+  if(type!=='text'&&!state.attachment&&!(state.editing?.message_type===type&&state.editing?.has_attachment))throw Error('Choose an attachment.');
+  const body={name:$('name').value,chatId:group.id,groupName:group.name,type,text:$('message').value,timezone:$('timezone').value,startLocal:$('start').value,frequency,enabled:$('enabled').checked,
+   interval:frequency==='once'?1:Number($('repeat-interval').value),weekdays:['daily','weekly'].includes(frequency)?selectedWeekdays():[],monthDays:frequency==='monthly'?selectedMonthDays():[],endDate:frequency==='once'?null:$('end-date').value||null,
+   ...(type!=='text'&&state.attachment?state.attachment:{})};
+  await api(state.editing?`/v1/schedules/${state.editing.id}`:'/v1/schedules',{method:state.editing?'PUT':'POST',body});
+  state.busy=false;closeEditor();clearFilters();notice(body.enabled?'Message scheduled.':'Schedule saved and paused.');await loadSchedules();
+ }catch(e){error('form-error',e.message);}finally{state.busy=false;$('save').disabled=false;}
+});
 $('confirm-delete').addEventListener('click',async()=>{const b=$('confirm-delete');b.disabled=true;try{await api(`/v1/schedules/${state.deleteId}`,{method:'DELETE'});$('delete-dialog').close();notice('Schedule deleted. Its history is kept.');await loadSchedules();}catch(e){error('delete-error',e.message);}finally{b.disabled=false;}});
 for(const id of ['new-schedule','empty-create','history-create'])$(id).addEventListener('click',()=>{if(state.route!=='settings/scheduled')navigate('settings/scheduled');openEditor();});
 for(const id of ['close-editor','cancel'])$(id).addEventListener('click',closeEditor);
@@ -145,5 +211,40 @@ $('phone-search').addEventListener('input',renderPhone);$('phone-filter').addEve
 $('phone-clear').addEventListener('click',()=>{$('phone-search').value='';$('phone-filter').value='all';renderPhone();});
 $('phone-status').addEventListener('click',()=>state.connected?info('WhatsApp connected','Your linked number is ready to send and receive messages.'):refreshConnection(true));
 $('api-copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText('https://wa.ajaypawriya.com');notice('API address copied.');}catch{info('API address','https://wa.ajaypawriya.com');}});
-showView(currentRoute());loadConnection();loadGroups();
+const messageActionNames={edit:'Save edit',delete:'Delete for everyone',forward:'Forward message',react:'Apply reaction',pin:'Pin message',unpin:'Unpin message'};
+function updateMessageAction(){
+ const kind=$('message-action').value;
+ for(const [key,id] of [['edit','action-text-fields'],['forward','action-forward-fields'],['react','action-reaction-fields'],['pin','action-pin-fields']])$(id).hidden=key!==kind;
+ $('submit-message-action').disabled=state.actionBusy||state.actionLocked||(kind==='forward'&&!state.forwardReady);$('action-text').required=kind==='edit';$('action-destination').required=kind==='forward';$('submit-message-action').textContent=messageActionNames[kind];$('submit-message-action').className=kind==='delete'?'danger':'primary';
+ $('message-action-note').textContent=kind==='delete'?'Deletes this message from WhatsApp for everyone. This cannot be undone.':kind==='edit'?'WhatsApp limits how long messages can be edited. Send history keeps the original content.':'Applies to the selected WhatsApp message. Group permissions and WhatsApp limits still apply.';
+}
+function openMessageAction(entry){
+ state.actionEntry=entry;state.actionKey=null;state.actionBody=null;state.actionBusy=false;state.actionLocked=false;state.forwardReady=false;state.actionGeneration=(state.actionGeneration||0)+1;state.actionTrigger=document.activeElement;
+ $('message-action-form').reset();for(const input of $('message-action-form').elements)input.disabled=false;
+ $('action-message-preview').textContent=entry.message_text||'Selected message';$('action-text').value=entry.message_text||'';$('action-text').maxLength=entry.message_type==='text'?4000:1000;
+ $('action-destination').replaceChildren(new Option('Choose a group',''),...state.groups.map(g=>new Option(g.name,g.id)));
+ error('message-action-error');updateMessageAction();$('message-action-dialog').showModal();$('message-action').focus();
+}
+function closeMessageAction(){if(state.actionBusy)return;$('message-action-dialog').close();state.actionTrigger?.focus();}
+$('close-message-action').addEventListener('click',closeMessageAction);$('cancel-message-action').addEventListener('click',closeMessageAction);
+$('message-action-dialog').addEventListener('cancel',e=>{e.preventDefault();closeMessageAction();});$('message-action').addEventListener('change',()=>{updateMessageAction();if($('message-action').value==='forward')loadForwardGroups();});
+$('reload-action-groups').addEventListener('click',loadForwardGroups);
+async function loadForwardGroups(){
+ const generation=state.actionGeneration;state.forwardReady=false;$('action-destination').disabled=true;$('reload-action-groups').disabled=true;$('action-groups-state').textContent='Loading groups…';updateMessageAction();
+ try{const data=await api('/v1/groups');if(generation!==state.actionGeneration)return;
+  const groups=(Array.isArray(data)?data:Object.values(data)).map(g=>({id:typeof g.id==='string'?g.id:g.id?._serialized,name:g.subject||g.name||'Unnamed group'})).filter(g=>g.id?.endsWith('@g.us')).sort((a,b)=>a.name.localeCompare(b.name));
+  const selected=$('action-destination').value;$('action-destination').replaceChildren(new Option('Choose a group',''),...groups.map(g=>new Option(g.name,g.id)));$('action-destination').value=selected;
+  state.forwardReady=groups.length>0;$('action-groups-state').textContent=groups.length?'':'No groups found. Join a group in WhatsApp, then reload groups.';
+ }catch(e){if(generation===state.actionGeneration)$('action-groups-state').textContent='Could not load groups. Reconnect WhatsApp or reload groups.';}
+ finally{if(generation===state.actionGeneration){$('action-destination').disabled=!state.forwardReady||state.actionLocked;$('reload-action-groups').disabled=state.actionLocked;updateMessageAction();}}
+}
+$('message-action-form').addEventListener('submit',async e=>{
+ e.preventDefault();if(state.actionBusy)return;state.actionBusy=true;$('submit-message-action').disabled=true;error('message-action-error');let uncertain=false;
+ const entry=state.actionEntry,kind=$('message-action').value,body={chatId:entry.chat_id,messageId:entry.message_id,action:kind,...(kind==='edit'?{text:$('action-text').value}:kind==='forward'?{targetChatId:$('action-destination').value}:kind==='react'?{reaction:$('action-reaction').value}:kind==='pin'?{days:Number($('action-days').value)}:{})};
+ const serialized=JSON.stringify(body);if(state.actionBody!==serialized){state.actionKey=crypto.randomUUID();state.actionBody=serialized;}
+ try{await api('/v1/message-actions',{method:'POST',body,headers:{'Idempotency-Key':state.actionKey}});state.actionBusy=false;closeMessageAction();notice('Message action accepted by WhatsApp.');}
+ catch(errorResult){uncertain=!errorResult.status||errorResult.outcome==='unknown'||errorResult.status===409;error('message-action-error',uncertain?'Action unconfirmed or already attempted. Check WhatsApp before starting another action.':errorResult.message);}
+ finally{state.actionBusy=false;state.actionLocked=uncertain;if(uncertain){for(const input of $('message-action-form').elements)input.disabled=input.id!=='cancel-message-action';}else updateMessageAction();}
+});
+showView(currentRoute());loadConnection();loadGroups();loadCapabilities();
 setInterval(()=>{if(!document.hidden){loadConnection();if(!$('editor').open&&state.route==='settings/scheduled')loadSchedules();if(state.route==='settings/phones'&&!connectionBusy)refreshConnection();}},15000);

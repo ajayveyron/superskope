@@ -4,9 +4,11 @@ import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { resolve } from 'node:path';
 import {createScheduler} from './schedules.mjs';
-import {createGroupActions,imageFile} from './group-actions.mjs';
+import {createGroupActions} from './group-actions.mjs';
 import {createCommands} from './commands.mjs';
 import {createInterpreter} from './ai-commands.mjs';
+import {messagePayload} from './messages.mjs';
+import {createMessageActions,sentMessageId} from './message-actions.mjs';
 
 export function sameSecret(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -71,13 +73,7 @@ export function createHub({ wahaUrl, wahaKey, apiKey, webhookSecret, dataDir, no
   }
   async function sendMessage(body,id,canSend=()=>true){
     if(typeof id!=='string'||!/^[A-Za-z0-9_-]{8,128}$/.test(id))throw failure('Idempotency-Key required (8–128 letters, digits, _ or -)');
-    if(!body||typeof body.chatId!=='string'||!/^\d[\d-]*@g\.us$/.test(body.chatId))throw failure('A group chatId ending in @g.us is required');
-    if(!['text','pdf','image'].includes(body.type))throw failure('type must be text, pdf or image');
-    if(body.type==='text'&&(typeof body.text!=='string'||!body.text.trim()||body.text.length>4000))throw failure('text must contain 1–4000 characters');
-    if(body.type==='pdf'&&(typeof body.data!=='string'||body.data.length>7_000_000||!/^[A-Za-z0-9+/]+={0,2}$/.test(body.data)||!Buffer.from(body.data,'base64').subarray(0,5).equals(Buffer.from('%PDF-'))))throw failure('A base64 PDF under 5 MB is required');
-    if(body.type==='pdf'&&(typeof body.filename!=='string'||! /^[\w .-]{1,120}\.pdf$/i.test(body.filename)))throw failure('A valid PDF filename is required');
-    if(body.caption!==undefined&&(typeof body.caption!=='string'||body.caption.length>1000))throw failure('Caption must be at most 1,000 characters.');
-    const payload=body.type==='text'?{session:'default',chatId:body.chatId,text:body.text}:{session:'default',chatId:body.chatId,file:body.type==='image'?imageFile(body):{mimetype:'application/pdf',filename:body.filename,data:body.data},...(body.caption?{caption:body.caption}:{})};
+    const payload=messagePayload(body);
     const hash=createHash('sha256').update(JSON.stringify(payload)).digest('hex');
     const previous=db.prepare('SELECT * FROM sends WHERE id=?').get(id);
     if(previous){
@@ -89,7 +85,8 @@ export function createHub({ wahaUrl, wahaKey, apiKey, webhookSecret, dataDir, no
     if(session.status!=='WORKING')throw failure('WhatsApp is not connected. Reconnect to continue.',409,{retryable:true});
     if(stopping||!canSend())throw failure('Schedule paused before sending.',409,{cancelled:true});
     if(db.prepare('SELECT id FROM sends WHERE id=?').get(id))throw failure('This request is already being processed',409);
-    const recent=db.prepare('SELECT count(*) AS n FROM sends WHERE created_at > ?').get(new Date(now().getTime()-60_000).toISOString());
+    const cutoff=new Date(now().getTime()-60_000).toISOString();
+    const recent=db.prepare("SELECT (SELECT count(*) FROM sends WHERE created_at>?) + (SELECT count(*) FROM message_actions WHERE action='forward' AND created_at>?) AS n").get(cutoff,cutoff);
     if(recent.n>=10)throw failure('Limit reached: 10 sends per minute',429,{retryable:true});
     db.prepare('INSERT INTO sends (id,hash,state,created_at,result,chat_id,message_text,message_type) VALUES (?,?,?,?,NULL,?,?,?)').run(id,hash,'sending',now().toISOString(),body.chatId,body.text||body.caption||body.filename||'Image',body.type);
     try{
@@ -102,6 +99,7 @@ export function createHub({ wahaUrl, wahaKey, apiKey, webhookSecret, dataDir, no
     }
   }
   const scheduler=createScheduler({db,send:sendMessage,now,intervalMs:schedulerIntervalMs});
+  const messageActions=createMessageActions({db,waha,now});
   const groups=createGroupActions({db,waha,now});
   const commands=createCommands({db,groups,waha,send:sendMessage,media,now,intervalMs:commandIntervalMs,interpret:createInterpreter({dataDir})});
   const server = createServer(async (req, res) => {
@@ -120,6 +118,12 @@ export function createHub({ wahaUrl, wahaKey, apiKey, webhookSecret, dataDir, no
         return reply(res, 200, {ok: true});
       }
       if (!sameSecret(req.headers.authorization, `Bearer ${apiKey}`)) return reply(res, 401, {error: 'Bearer token required'});
+      if(req.method==='GET'&&url.pathname==='/v1/capabilities')return reply(res,200,{advancedSchedules:true,messageActions:true});
+      if(req.method==='GET'&&url.pathname==='/v1/message-actions')return reply(res,200,messageActions.history());
+      if(req.method==='POST'&&url.pathname==='/v1/message-actions'){
+        const result=await messageActions.execute(parse(await readBody(req)),req.headers['idempotency-key']);
+        return reply(res,result.state==='completed'?(result.replayed?200:201):502,result);
+      }
       if (req.method === 'GET' && url.pathname === '/v1/status') {
         const session = await waha('/api/sessions/default');
         return reply(res, 200, {name: session.name, status: session.status, me: session.me});
@@ -150,18 +154,23 @@ export function createHub({ wahaUrl, wahaKey, apiKey, webhookSecret, dataDir, no
       }
       if (req.method === 'GET' && url.pathname === '/v1/history') {
         const records=db.prepare(`SELECT s.id,s.state,s.created_at AS created_at,s.chat_id,s.message_text,s.message_type,r.schedule_id,r.due_at,r.error,c.name AS schedule_name,c.group_name FROM sends s LEFT JOIN runs r ON r.id=s.id LEFT JOIN schedules c ON c.id=r.schedule_id
-          UNION ALL SELECT r.id,r.state,r.started_at,c.chat_id,c.text,'text',r.schedule_id,r.due_at,r.error,c.name,c.group_name FROM runs r LEFT JOIN schedules c ON c.id=r.schedule_id WHERE r.state!='processing' AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.id=r.id) ORDER BY 3 DESC LIMIT 100`).all();
-        return reply(res,200,records);
+          UNION ALL SELECT r.id,r.state,r.started_at,c.chat_id,c.text,c.message_type,r.schedule_id,r.due_at,r.error,c.name,c.group_name FROM runs r LEFT JOIN schedules c ON c.id=r.schedule_id WHERE r.state!='processing' AND NOT EXISTS (SELECT 1 FROM sends s WHERE s.id=r.id) ORDER BY 3 DESC LIMIT 100`).all();
+        return reply(res,200,records.map(row=>{
+          const send=db.prepare('SELECT result FROM sends WHERE id=?').get(row.id);
+          let result;try{result=JSON.parse(send?.result);}catch{}
+          return {...row,message_id:row.state==='sent'?sentMessageId(result,row.chat_id):null};
+        }));
       }
       if (req.method === 'GET' && url.pathname === '/v1/schedules')return reply(res,200,scheduler.list());
       if (req.method === 'POST' && url.pathname === '/v1/schedules'){
         const body=parse(await readBody(req));
         return reply(res,201,scheduler.save(body));
       }
-      const schedulePath=url.pathname.match(/^\/v1\/schedules\/([a-f0-9-]+)(?:\/(enabled))?$/);
+      const schedulePath=url.pathname.match(/^\/v1\/schedules\/([a-f0-9-]+)(?:\/(enabled|skip))?$/);
       if(schedulePath){
         const [,id,action]=schedulePath;
         if(req.method==='PATCH'&&action==='enabled')return reply(res,200,scheduler.toggle(id,parse(await readBody(req))?.enabled));
+        if(req.method==='POST'&&action==='skip')return reply(res,200,scheduler.skip(id,parse(await readBody(req))?.expectedNextRun));
         if(req.method==='PUT'&&!action)return reply(res,200,scheduler.save(parse(await readBody(req)),id));
         if(req.method==='DELETE'&&!action){scheduler.remove(id);return reply(res,200,{ok:true});}
       }

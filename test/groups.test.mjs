@@ -67,15 +67,23 @@ test('typing surrounds AI answers, clarifications and errors, and stops after a 
   }finally{await f.commands.close();f.db.close();}
  }
 });
-test('AI clarifications stay with the same admin and group, and never mutate by themselves',async()=>{
+test('clarifications and completed actions persist for the same admin without leaking to another admin',async()=>{
  const f=fixture();try{
   f.commands.configure({enabled:true});f.setPlan({intent:'clarify',message:'Who should become an admin?',actions:[]});
   f.commands.enqueue(f.event({id:'unclear',body:'@910000000001 make him admin'}));await f.commands.tick();assert.equal(f.calls.length,0);assert.equal(f.commands.history()[0].state,'clarification');
   f.setPlan({intent:'answer',message:'I can help manage this group.',actions:[]});
-  f.commands.enqueue(f.event({id:'other-admin',fromMe:true,source:'app',to:chat,body:'SuperSkope what can you do?'}));await f.commands.tick();assert.equal(f.interpretations[1].previous.length,0);
+  f.commands.enqueue(f.event({id:'other-admin',fromMe:true,source:'app',to:chat,body:'SuperSkope what can you do?'}));await f.commands.tick();assert.equal(f.interpretations[1].conversation.recent.length,0);
   f.setPlan({intent:'act',message:'',actions:[{action:'promote',participants:[member]}]});
-  f.commands.enqueue(f.event({id:'answer',body:'@910000000001 I meant @910000000003'}));await f.commands.tick();assert.equal(f.interpretations[2].previous.length,2);assert.equal(f.calls.length,1);
-  f.commands.enqueue(f.event({id:'new-request'}));await f.commands.tick();assert.equal(f.interpretations[3].previous.length,0);
+  f.commands.enqueue(f.event({id:'answer',body:'@910000000001 I meant @910000000003'}));await f.commands.tick();assert.equal(f.interpretations[2].conversation.recent.length,1);assert.equal(f.interpretations[2].conversation.recent[0].clarificationOpen,true);assert.equal(f.calls.length,1);
+  f.setPlan({intent:'answer',message:'The admin change was completed.',actions:[]});
+  f.commands.enqueue(f.event({id:'new-request',body:'@910000000001 what happened?'}));await f.commands.tick();
+  const previous=f.interpretations[3].conversation.recent;
+  assert.equal(previous.length,2);assert.equal(previous[0].clarificationOpen,false);
+  assert.equal(previous[1].actions[0].state,'completed');assert.deepEqual(previous[1].actions[0].participants,[member]);assert.equal(f.calls.length,1);
+  // Revocation is checked before reading memory or invoking the model.
+  f.group.participants[1].admin=null;
+  f.commands.enqueue(f.event({id:'revoked',body:'@910000000001 undo that'}));await f.commands.tick();
+  assert.equal(f.interpretations.length,4);assert.equal(f.calls.length,1);assert.equal(f.commands.history()[0].state,'rejected');
  }finally{await f.commands.close();f.db.close();}
 });
 test('multi-action requests stop at an uncertain action and do not re-run on duplicate webhooks',async()=>{
@@ -83,5 +91,8 @@ test('multi-action requests stop at an uncertain action and do not re-run on dup
   f.commands.configure({enabled:true});f.setPlan({intent:'act',message:'',actions:[{action:'description',description:'Example'},{action:'promote',participants:[member]}]});f.setFailure(true);
   f.commands.enqueue(f.event());await f.commands.tick();assert.equal(f.calls.length,1);assert.equal(f.commands.history()[0].state,'unknown');assert.match(f.replies[0].body.text,/stopped/);
   f.setFailure(false);f.commands.enqueue(f.event());await f.commands.tick();assert.equal(f.calls.length,1);
+  f.setPlan({intent:'answer',message:'The first change is unconfirmed; the next was not attempted.',actions:[]});
+  f.commands.enqueue(f.event({id:'ask-outcome',body:'@910000000001 what happened?'}));await f.commands.tick();
+  assert.deepEqual(f.interpretations[1].conversation.recent[0].actions.map(a=>a.state),['unknown','not-run']);assert.equal(f.calls.length,1);
  }finally{await f.commands.close();f.db.close();}
 });

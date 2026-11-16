@@ -29,3 +29,19 @@ test('structured interpretation sends only current-group candidates, validates o
  const denied=createInterpreter({key:'test-key',fetchImpl:async()=>new Response('secret provider detail',{status:401})});await assert.rejects(()=>denied(context),/Nothing was changed/);
  const truncated=createInterpreter({key:'test-key',fetchImpl:async()=>Response.json({choices:[{finish_reason:'length',message:{content:'{}'}}]})});await assert.rejects(()=>truncated(context),/Nothing was changed/);
 });
+test('remembered people resolve to fresh candidates, retaining identity after contact or group changes',async()=>{
+ const conversation={summary:[],recent:[{request:'Add Rashi, +910000000003.',state:'completed',people:[{id:member,ids:[member,'33333@lid'],name:'Rashi'}],actions:[{action:'add',participants:[member],state:'completed'}]}]};
+ let sent;
+ const interpret=createInterpreter({key:'test-key',fetchImpl:async(_url,options)=>{
+  sent=JSON.parse(JSON.parse(options.body).messages[1].content);
+  const rashi=sent.candidates.find(p=>p.identifiers.includes(member));
+  return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({intent:'act',message:'',actions:[action('promote',[rashi.ref])]})}}]});
+ }});
+ // Participant order and therefore refs changed since the previous turn.
+ const updated={...context,text:'Now make her an admin.',mentions:[],contacts:[],group:{...group,participants:[...group.participants].reverse()},conversation};
+ assert.deepEqual((await interpret(updated)).actions,[{action:'promote',participants:[member]}]);
+ assert.equal(sent.candidates[0].name,'Rashi');assert.equal(sent.conversation.recent[0].actions[0].state,'completed');
+ await assert.rejects(()=>interpret({...updated,group:{...group,participants:[group.participants[0]]}}),/not in this group/);
+ const fromSummary=commandCandidates({...updated,conversation:{summary:conversation.recent,recent:[]}});
+ assert.equal(fromSummary.find(p=>p.id===member).name,'Rashi');
+});

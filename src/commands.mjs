@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { fail, groupId, identities, personId, imageFile } from './group-actions.mjs';
-import { createInterpreter, completedMessage } from './ai-commands.mjs';
+import { createInterpreter, completedMessage, commandCandidates } from './ai-commands.mjs';
 import { createTyping } from './typing.mjs';
+import { createConversationMemory, memoryIdentity, memoryLimits } from './conversation-memory.mjs';
 
 export const adminOnlyReply = 'Only group admins can use SuperSkope right now. Please ask a group admin to make you an admin, then try again.';
 
@@ -19,11 +20,11 @@ export function messageContext(payload) {
 export function createCommands({db,groups,waha,send,media,now=()=>new Date(),intervalMs=1000,interpret=createInterpreter(),startTyping=createTyping({waha})}) {
   db.exec(`CREATE TABLE IF NOT EXISTS command_config (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL);
     INSERT OR IGNORE INTO command_config VALUES (1,0);
-    CREATE TABLE IF NOT EXISTS command_context (group_id TEXT NOT NULL, actor TEXT NOT NULL, expires_at TEXT NOT NULL, turns TEXT NOT NULL, PRIMARY KEY(group_id,actor));
     CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, group_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL, result TEXT);
-    UPDATE commands SET state='unknown',result='{"error":"Interrupted. Inspect the group before sending another command."}' WHERE state='processing';`);
+    UPDATE commands SET state='unknown',result=json_set(COALESCE(result,'{}'),'$.error','Interrupted. Inspect the group before sending another command.') WHERE state='processing';`);
+  const memory=createConversationMemory({db,now});
   let running=false,closed=false;
-  const config=()=>({enabled:!!db.prepare('SELECT enabled FROM command_config WHERE id=1').get().enabled,policy:'group-admins',selfPrefix:'SuperSkope',...interpret.info?.()});
+  const config=()=>({enabled:!!db.prepare('SELECT enabled FROM command_config WHERE id=1').get().enabled,policy:'group-admins',selfPrefix:'SuperSkope',...interpret.info?.(),memory:{persistent:true,...memoryLimits}});
   function configure(body){if(typeof body?.enabled!=='boolean')throw fail('enabled must be true or false.');db.prepare('UPDATE command_config SET enabled=? WHERE id=1').run(Number(body.enabled));return config();}
   function enqueue(event) {
     if(!config().enabled||!['message','message.any'].includes(event.event)||event.session!=='default')return;
@@ -68,21 +69,22 @@ export function createCommands({db,groups,waha,send,media,now=()=>new Date(),int
         return;
       }
       authorized=true;
-      const contextActor=personId(member.id),ctx=messageContext(p);
-      const pending=db.prepare('SELECT turns FROM command_context WHERE group_id=? AND actor=? AND expires_at>?').get(row.group_id,contextActor,now().toISOString());
-      const previous=pending?JSON.parse(pending.turns):[];
+      const ctx=messageContext(p);
       if(db.prepare("SELECT count(*) AS n FROM commands WHERE state!='rejected' AND created_at>?").get(new Date(now().getTime()-60000).toISOString()).n>10)throw fail('I have several requests to process. Please try again in a minute.',429);
+      if(typeof ctx.text!=='string'||ctx.text.length>8000)throw fail('Please send a shorter request, under 8,000 characters.');
+      const scope={account:memoryIdentity(session.me),group:row.group_id,actor:memoryIdentity(member)};
+      const conversation=memory.read(scope);
+      memory.begin(scope,row,ctx.text);
       // Resolve only members of this group against WhatsApp's local contact store.
       // No unrelated chats or contact list is sent to the language model.
       const contacts=await waha('/api/contacts/all?session=default&limit=5000').catch(()=>[]);
-      const plan=await interpret({text:ctx.text,mentions:ctx.mentions,selfIds:self,group,contacts:Array.isArray(contacts)?contacts:[],hasPhoto:!!(p.media?.url||p.hasMedia||p.replyTo?.id),previous});
-      if(plan.intent==='clarify'){
-        const turns=[...previous,{role:'user',text:ctx.text},{role:'assistant',text:plan.message}].slice(-6);
-        db.prepare('INSERT INTO command_context VALUES (?,?,?,?) ON CONFLICT(group_id,actor) DO UPDATE SET expires_at=excluded.expires_at,turns=excluded.turns').run(row.group_id,contextActor,new Date(now().getTime()+600000).toISOString(),JSON.stringify(turns));
-      }else db.prepare('DELETE FROM command_context WHERE group_id=? AND actor=?').run(row.group_id,contextActor);
+      const input={text:ctx.text,mentions:ctx.mentions,selfIds:self,group,contacts:Array.isArray(contacts)?contacts:[],hasPhoto:!!(p.media?.url||p.hasMedia||p.replyTo?.id),conversation};
+      const plan=await interpret(input);
+      const targets=plan.actions.flatMap(action=>action.participants||[]);
+      memory.people(row.id,commandCandidates(input).filter(c=>!c.bot&&(c.mentioned||c.ids.some(id=>targets.includes(id)))).map(({id,ids,name})=>({id,ids,name})).slice(0,80));
       const actions=[];
       for(const action of plan.actions)actions.push(action.action==='picture'?{...action,...await photo(p,row.group_id)}:action);
-      const audit={model:plan.model,usage:plan.usage,plan:actions.map(({data,...action})=>action),results:[]};
+      const audit={intent:plan.intent,model:plan.model,usage:plan.usage,plan:actions.map(({data,...action})=>action),results:[]};
       db.prepare('UPDATE commands SET result=? WHERE id=?').run(JSON.stringify(audit),row.id);
       let state=plan.intent==='clarify'?'clarification':'completed',reply=plan.message;
       for(let i=0;i<actions.length;i++){
