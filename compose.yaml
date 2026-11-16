@@ -1,0 +1,44 @@
+name: wa-hub
+services:
+  waha:
+    image: devlikeapro/waha:noweb-arm-2026.10.1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3010:3000"
+    environment:
+      WAHA_API_KEY: "${WAHA_API_KEY_HASH}"
+      WAHA_DASHBOARD_USERNAME: admin
+      WAHA_DASHBOARD_PASSWORD: "${DASHBOARD_PASSWORD}"
+      WHATSAPP_SWAGGER_USERNAME: admin
+      WHATSAPP_SWAGGER_PASSWORD: "${DASHBOARD_PASSWORD}"
+      WHATSAPP_DEFAULT_ENGINE: NOWEB
+      WAHA_LOG_LEVEL: info
+    volumes:
+      - ./sessions:/app/.sessions
+      - ./media:/app/.media
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  hub:
+    image: node:24.11.1-alpine
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "src/server.mjs"]
+    ports:
+      - "127.0.0.1:3011:3011"
+    environment:
+      WAHA_URL: http://waha:3000
+      WAHA_API_KEY: "${WAHA_API_KEY}"
+      HUB_API_KEY: "${HUB_API_KEY}"
+      WEBHOOK_SECRET: "${WEBHOOK_SECRET}"
+      AI_GATEWAY_API_KEY: "${AI_GATEWAY_API_KEY:-}"
+      AI_COMMAND_MODEL: "${AI_COMMAND_MODEL:-openai/gpt-5.4-mini}"
+      DATA_DIR: /app/data
+      HOST: 0.0.0.0
+    volumes:
+      - ./src:/app/src:ro
+      - ./data:/app/data
+    depends_on: [waha]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
